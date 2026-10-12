@@ -322,14 +322,25 @@ Context: ${context || "none given"}`;
     let saved = ""; try { saved = localStorage.getItem("pl-model") || ""; } catch {}
     const current = modelEl.value;
     modelEl.replaceChildren(...usable.map((m) => el("option", { value: m.id, text: `${m.label} (${m.id})` })));
-    const pick = [saved, current].find((v) => usable.some((m) => m.id === v))
-      || (usable.find((m) => /flash/.test(m.id) && !/lite/.test(m.id) && rank(m.id) < 2) || usable[0]).id;
-    modelEl.value = pick;
+    const ok = (v) => v && usable.some((m) => m.id === v) && !badModels().includes(v);
+    modelEl.value = [saved, current].find(ok) || fallbacks()[0] || usable[0].id;
   }
+  // Models Google lists but refuses for this key (e.g. Pro on the free tier) are remembered and skipped.
+  const badModels = () => { try { return JSON.parse(localStorage.getItem("pl-bad") || "[]"); } catch { return []; } };
+  const markBad = (id) => { try { localStorage.setItem("pl-bad", JSON.stringify([...new Set([...badModels(), id])])); } catch {} };
+  const fallbacks = () => {
+    const ids = [...modelEl.options].map((o) => o.value).filter((v) => !badModels().includes(v));
+    const stable = (v) => !/preview|exp/.test(v);
+    return [
+      ...ids.filter((v) => /flash/.test(v) && !/lite/.test(v) && stable(v)),
+      ...ids.filter((v) => /flash-lite/.test(v) && stable(v)),
+      ...ids.filter((v) => /flash/.test(v)),
+    ].filter((v, i, a) => a.indexOf(v) === i);
+  };
   loadModels();
 
-  async function gemini(prompt, { signal, onText }) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelEl.value)}:streamGenerateContent?alt=sse`;
+  async function gemini(prompt, { signal, onText, model }) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
     const res = await fetch(url, {
       method: "POST", signal,
       headers: { "Content-Type": "application/json", "x-goog-api-key": keyEl.value.trim() },
@@ -380,17 +391,35 @@ Context: ${context || "none given"}`;
     setStatus("Thinking… (usually 10–40 seconds)");
     let report;
     try {
-      const raw = await gemini(buildPrompt(k, text.slice(0, 6000), context.slice(0, 500)), {
-        signal: ctl.signal,
-        onText: (t) => { setStatus("Writing the report…"); live.textContent = t; live.scrollTop = live.scrollHeight; },
-      });
+      const prompt = buildPrompt(k, text.slice(0, 6000), context.slice(0, 500));
+      const tried = [];
+      let raw;
+      for (let model = modelEl.value; ; ) {
+        tried.push(model);
+        try {
+          raw = await gemini(prompt, {
+            signal: ctl.signal, model,
+            onText: (t) => { setStatus("Writing the report…"); live.textContent = t; live.scrollTop = live.scrollHeight; },
+          });
+          break;
+        } catch (err) {
+          // 404 = model not served to this key; 429 with "limit: 0" = model has no free-tier quota.
+          const unusable = err && (err.status === 404 || (err.status === 429 && /limit:\s*0\b/.test(err.message || "")));
+          const next = unusable && fallbacks().find((v) => !tried.includes(v) && v !== model);
+          if (!next || tried.length >= 3) throw err;
+          markBad(model);
+          modelEl.value = next; try { localStorage.setItem("pl-model", next); } catch {}
+          setStatus(`${model} isn't available on your plan. Retrying with ${next}…`);
+          model = next;
+        }
+      }
       report = parseJson(raw);
     } catch (err) {
       if (err && err.name === "AbortError") { setStatus("Stopped."); return; }
       const s = err && err.status;
       const msg = s === 400 || s === 401 || s === 403 ? `Gemini rejected the request. Check your API key. ${err.message || ""}`
-        : s === 429 ? "Free-tier limit reached. Wait a minute, or switch to Flash-Lite."
-        : s === 404 ? `Model "${modelEl.value}" isn't available for your key. Pick another model from the list.`
+        : s === 429 ? `Free-tier limit reached for ${modelEl.value}. Wait a minute, or pick a Flash-Lite model.`
+        : s === 404 ? `Model "${modelEl.value}" isn't available for your key. Pick a Flash model from the list.`
         : (err && err.message) || "Couldn't reach Gemini. Check your connection and press Analyse to try again.";
       setStatus(msg, true);
       return;
