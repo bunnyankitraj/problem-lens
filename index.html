@@ -132,6 +132,11 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .probe li { display: grid; grid-template-columns: 18px minmax(0,1fr); gap: 6px; overflow-wrap: anywhere; }
 .probe .ok { color: var(--good); } .probe .no { color: var(--bad); } .probe .wait { color: var(--muted); }
 .probe small { grid-column: 2; color: var(--muted); }
+.privacy { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--accent-soft); font-size: 12.5px; color: var(--ink); }
+.privacy b { color: var(--accent); }
+.foot-actions { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.copy { background: var(--accent); color: var(--panel); padding: 7px 14px; font-size: 13px; }
+.copybox { width: 100%; min-height: 160px; font-family: var(--f-mono); font-size: 12px; }
 .danger { background: transparent; border: 0; padding: 0; color: var(--bad); font-weight: 500; font-size: 12.5px; }
 .live { white-space: pre-wrap; font-family: var(--f-mono); font-size: 12px; color: var(--muted); max-height: 220px; overflow: auto; background: var(--bg); border-radius: 8px; padding: 10px; }
 @media (prefers-reduced-motion: no-preference) { .report { animation: rise .35s ease-out both; } @keyframes rise { from { transform: translateY(6px); } to { transform: none; } } }
@@ -198,7 +203,8 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
       <section class="card" aria-labelledby="cases-h">
         <p class="eyebrow" id="cases-h">Case file <span id="count"></span></p>
         <ul class="cases" id="cases"></ul>
-        <p class="empty" id="cases-empty">No cases yet. Analysed problems and ideas are saved here, in this browser.</p>
+        <p class="empty" id="cases-empty">No cases yet. Analysed problems and ideas show up here.</p>
+        <p class="privacy"><b>We don't keep your data.</b> There is no server: reports stay only in this browser and disappear if you clear site data or switch devices. Use <b>Copy report</b> to keep one.</p>
       </section>
     </div>
 
@@ -548,7 +554,25 @@ Context: ${context || "none given"}`;
       steps.append(el("li", {}, el("div", {}, el("div", { text: str(x && x.step, 400) }), when ? el("div", { class: "when", text: when }) : null)));
     }
 
-    const foot = el("div", { class: "foot" }, el("span", { text: "AI-generated analysis. Check facts and figures before acting on them." }));
+    const actions = el("div", { class: "foot-actions" });
+    const foot = el("div", { class: "foot" },
+      el("span", { text: "AI-generated analysis. Check facts and figures before acting on them. We don't store it; copy it to keep it." }),
+      actions);
+    const copy = el("button", { class: "copy", type: "button", text: "Copy report" });
+    copy.addEventListener("click", async () => {
+      const md = toMarkdown(entry);
+      try {
+        await navigator.clipboard.writeText(md);
+        copy.textContent = "Copied ✓";
+      } catch {
+        // Clipboard blocked: show the text selected so the viewer can copy it manually.
+        const box = el("textarea", { class: "copybox", readonly: "", "aria-label": "Report text" });
+        box.value = md; foot.after(box); box.focus(); box.select();
+        copy.textContent = "Press Cmd/Ctrl+C";
+      }
+      setTimeout(() => { copy.textContent = "Copy report"; }, 2500);
+    });
+    actions.append(copy);
     {
       const del = el("button", { class: "danger", type: "button", text: "Delete case" });
       let armed = false;
@@ -556,7 +580,7 @@ Context: ${context || "none given"}`;
         if (!armed) { armed = true; del.textContent = "Click again to delete"; setTimeout(() => { armed = false; del.textContent = "Delete case"; }, 4000); return; }
         cases = cases.filter((c) => c.id !== id); save(); openId = null; resetView();
       });
-      foot.append(del);
+      actions.append(del);
     }
 
     const view = $("#view");
@@ -580,6 +604,30 @@ Context: ${context || "none given"}`;
       section("Why this verdict", el("p", { text: str(r.verdictReason, 600) })),
       section("Original submission", el("div", { class: "source", text: str(entry.text, 6000) + (entry.context ? `\n\nContext: ${str(entry.context, 500)}` : "") })),
       foot));
+  }
+
+  function toMarkdown(entry) {
+    const r = entry.report || {}, p = r.problem || {}, s = r.scores || {};
+    const L = [];
+    L.push(`# ${str(r.title) || "Untitled case"}`, "", str(r.oneLiner), "");
+    L.push(`**Type:** ${entry.kind === "idea" ? "Idea" : "Problem"}  `, `**Category:** ${str(r.category) || "—"}  `,
+      `**Verdict:** ${str(r.verdict) || "—"} (avg ${overall(r).toFixed(1)}/10)  `, `**Date:** ${fmtDate(entry.createdAt)}`, "");
+    L.push("## Scores");
+    for (const [k, label] of [["impact", "Impact"], ["feasibility", "Feasibility"], ["urgency", "Urgency"], ["novelty", "Novelty"]]) {
+      const o = s[k] && typeof s[k] === "object" ? s[k] : { value: s[k] };
+      L.push(`- **${label}:** ${num(o.value)}/10${o.why ? " — " + str(o.why) : ""}`);
+    }
+    L.push("", "## The problem", str(p.statement), "", `- **Who it affects:** ${str(p.whoIsAffected)}`, `- **Scale:** ${str(p.scale)}`, "");
+    L.push("## Root causes", ...arr(r.rootCauses).map((x) => `- ${str(x)}`), "");
+    L.push("## What already exists", ...arr(r.existingSolutions).map((x) => `- **${str(x && x.name)}:** ${str(x && x.gap)}`), "");
+    L.push("## Opportunity", str(r.opportunity), "");
+    L.push("## Next steps", ...arr(r.nextSteps).map((x, i) => `${i + 1}. ${str(x && x.step)}${x && (x.timeframe || x.cost) ? ` (${[str(x.timeframe), str(x.cost)].filter(Boolean).join(", ")})` : ""}`), "");
+    L.push("## Risks", ...arr(r.risks).map((x) => `- ${str(x)}`), "");
+    L.push("## Signals of success", ...arr(r.metrics).map((x) => `- ${str(x)}`), "");
+    L.push("## Why this verdict", str(r.verdictReason), "");
+    L.push("## Original submission", str(entry.text, 6000), entry.context ? `\nContext: ${str(entry.context, 500)}` : "", "");
+    L.push("---", "Generated with Problem Lens (Gemini): https://bunnyankitraj.github.io/problem-lens/");
+    return L.join("\n");
   }
 
   function resetView() {
