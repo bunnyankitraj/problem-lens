@@ -293,8 +293,40 @@ Context: ${context || "none given"}`;
   // ---------- Gemini ----------
   const keyEl = $("#apikey"), modelEl = $("#model");
   try { keyEl.value = localStorage.getItem("pl-key") || ""; const m = localStorage.getItem("pl-model"); if (m) modelEl.value = m; } catch {}
-  keyEl.addEventListener("change", () => { try { localStorage.setItem("pl-key", keyEl.value.trim()); } catch {} });
+  keyEl.addEventListener("change", () => { try { localStorage.setItem("pl-key", keyEl.value.trim()); } catch {} loadModels(); });
   modelEl.addEventListener("change", () => { try { localStorage.setItem("pl-model", modelEl.value); } catch {} });
+
+  // Ask Google which text models this key can call, so retired model names never break the app.
+  async function loadModels() {
+    const key = keyEl.value.trim();
+    if (!key) return;
+    let models = [];
+    try {
+      let token = "";
+      do {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000${token ? "&pageToken=" + encodeURIComponent(token) : ""}`, { headers: { "x-goog-api-key": key } });
+        if (!res.ok) return;
+        const j = await res.json();
+        models.push(...(j.models || []));
+        token = j.nextPageToken || "";
+      } while (token);
+    } catch { return; }
+    const skip = /embedding|tts|image|audio|live|vision|aqa|learnlm|robotics|computer-use|native/i;
+    const usable = models
+      .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
+      .map((m) => ({ id: String(m.name || "").replace(/^models\//, ""), label: m.displayName || m.name }))
+      .filter((m) => /^gemini-/.test(m.id) && !skip.test(m.id));
+    if (!usable.length) return;
+    const rank = (id) => (/latest$/.test(id) ? 0 : /preview|exp/.test(id) ? 2 : 1);
+    usable.sort((a, b) => rank(a.id) - rank(b.id) || b.id.localeCompare(a.id, undefined, { numeric: true }));
+    let saved = ""; try { saved = localStorage.getItem("pl-model") || ""; } catch {}
+    const current = modelEl.value;
+    modelEl.replaceChildren(...usable.map((m) => el("option", { value: m.id, text: `${m.label} (${m.id})` })));
+    const pick = [saved, current].find((v) => usable.some((m) => m.id === v))
+      || (usable.find((m) => /flash/.test(m.id) && !/lite/.test(m.id) && rank(m.id) < 2) || usable[0]).id;
+    modelEl.value = pick;
+  }
+  loadModels();
 
   async function gemini(prompt, { signal, onText }) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelEl.value)}:streamGenerateContent?alt=sse`;
@@ -358,7 +390,7 @@ Context: ${context || "none given"}`;
       const s = err && err.status;
       const msg = s === 400 || s === 401 || s === 403 ? `Gemini rejected the request. Check your API key. ${err.message || ""}`
         : s === 429 ? "Free-tier limit reached. Wait a minute, or switch to Flash-Lite."
-        : s === 404 ? "That model isn't available for your key. Pick another model."
+        : s === 404 ? `Model "${modelEl.value}" isn't available for your key. Pick another model from the list.`
         : (err && err.message) || "Couldn't reach Gemini. Check your connection and press Analyse to try again.";
       setStatus(msg, true);
       return;
