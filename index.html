@@ -128,6 +128,10 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .placeholder { display: grid; gap: 10px; place-items: start; padding-block: 24px; }
 .placeholder p { margin: 0; color: var(--muted); max-width: 55ch; }
 .foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line); padding-top: 14px; font-size: 12.5px; color: var(--muted); }
+.probe { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 4px; font-family: var(--f-mono); font-size: 12px; }
+.probe li { display: grid; grid-template-columns: 18px minmax(0,1fr); gap: 6px; overflow-wrap: anywhere; }
+.probe .ok { color: var(--good); } .probe .no { color: var(--bad); } .probe .wait { color: var(--muted); }
+.probe small { grid-column: 2; color: var(--muted); }
 .danger { background: transparent; border: 0; padding: 0; color: var(--bad); font-weight: 500; font-size: 12.5px; }
 .live { white-space: pre-wrap; font-family: var(--f-mono); font-size: 12px; color: var(--muted); max-height: 220px; overflow: auto; background: var(--bg); border-radius: 8px; padding: 10px; }
 @media (prefers-reduced-motion: no-preference) { .report { animation: rise .35s ease-out both; } @keyframes rise { from { transform: translateY(6px); } to { transform: none; } } }
@@ -184,6 +188,10 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
             <option value="gemini-2.5-pro">Gemini 2.5 Pro (deeper, lower free limits)</option>
           </select>
         </div>
+        <div class="row" style="margin-bottom:10px">
+          <button class="ghost" id="check" type="button">Check which models work</button>
+        </div>
+        <ul class="probe" id="probe" hidden></ul>
         <p class="hint" id="aihint">Get a free key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="color:var(--accent)">aistudio.google.com/apikey</a>. It is saved only in this browser and sent only to Google.</p>
       </section>
 
@@ -338,6 +346,48 @@ Context: ${context || "none given"}`;
     ].filter((v, i, a) => a.indexOf(v) === i);
   };
   loadModels();
+
+  // Send a tiny request to each listed model; keep only the ones this key can actually run.
+  const checkBtn = $("#check"), probeEl = $("#probe");
+  checkBtn.addEventListener("click", async () => {
+    const key = keyEl.value.trim();
+    if (!key) { setStatus("Paste your Gemini API key in Gemini settings first.", true); keyEl.focus(); return; }
+    try { localStorage.setItem("pl-key", key); localStorage.removeItem("pl-bad"); } catch {}
+    checkBtn.disabled = true; checkBtn.textContent = "Checking…";
+    await loadModels();
+    const ids = [...modelEl.options].map((o) => o.value).slice(0, 12);
+    probeEl.hidden = false; probeEl.replaceChildren();
+    const rows = Object.fromEntries(ids.map((id) => {
+      const mark = el("span", { class: "wait", text: "…" }), li = el("li", {}, mark, el("span", { text: id }));
+      probeEl.append(li); return [id, { li, mark }];
+    }));
+    const working = [];
+    await Promise.all(ids.map(async (id) => {
+      let ok = false, why = "";
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(id)}:generateContent`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+          body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "Reply with the word OK." }] }] }),
+        });
+        ok = res.ok;
+        if (!ok) { try { why = (await res.json()).error.message; } catch {} why = `${res.status}${why ? ": " + why.split(/[.\n]/)[0] : ""}`; }
+      } catch { why = "network error"; }
+      const r = rows[id];
+      r.mark.className = ok ? "ok" : "no"; r.mark.textContent = ok ? "✓" : "✗";
+      if (!ok) { markBad(id); r.li.append(el("small", { text: why.slice(0, 140) })); } else working.push(id);
+    }));
+    if (working.length) {
+      const keep = [...modelEl.options].filter((o) => working.includes(o.value));
+      modelEl.replaceChildren(...keep);
+      modelEl.value = fallbacks().find((v) => working.includes(v)) || working[0];
+      try { localStorage.setItem("pl-model", modelEl.value); } catch {}
+      setStatus(`${working.length} model${working.length > 1 ? "s" : ""} work with your key. Using ${modelEl.value}.`);
+    } else {
+      setStatus("None of the models answered. Check the key, or see the reasons listed under Gemini settings.", true);
+    }
+    checkBtn.disabled = false; checkBtn.textContent = "Check which models work";
+  });
 
   async function gemini(prompt, { signal, onText, model }) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
